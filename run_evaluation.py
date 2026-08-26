@@ -69,9 +69,9 @@ def evaluate_cases(cases, agent):
         })
         
         if passed:
-            print("✓ Passed\n")
+            print("PASS\n")
         else:
-            print(f"✗ Failed: {', '.join(failed_reasons)}")
+            print(f"FAIL: {', '.join(failed_reasons)}")
             print(f"Model Output: {final_answer.strip()}\n")
             
     return results

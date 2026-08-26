@@ -119,7 +119,10 @@ GUIDELINES:
      - The order status is 'exception'.
      - The user asks for a human, manager, or representative.
      - The user wants to cancel, refund, or change their address (these actions are unsupported).
-7. Conciseness:
+7. Return Windows & Customer Types:
+   - Standard/regular customers have a 30 calendar day return window from delivery (from 01-returns-policy-current.md).
+   - TrailPlus members have a 45 calendar day return window (from 09-trailplus-membership.md). NEVER use 45 days for standard/regular customers.
+8. Conciseness:
    - Provide a VERY brief, direct answer. 1 or 2 sentences MAXIMUM. Do not ramble.
 
 FORMAT YOUR RESPONSE EXACTLY AS:
@@ -160,23 +163,31 @@ Handoff: <True or False>
         if any(phrase in answer_lower for phrase in handoff_phrases):
             handoff = True
             
-        # NOTE: We do NOT trust the model's own "Handoff: True/False" output.\n        # Small local models are unreliable at this. Handoff is fully controlled\n        # by the programmatic triggers above.
+        # NOTE: We do NOT trust the model's own "Handoff: True/False" output.
+        # Small local models are unreliable at this. Handoff is fully controlled
+        # by the programmatic triggers above.
             
         # Extract the "Answer:" portion from the response if format was followed
         answer_match = re.search(r'Answer:\s*(.*?)(?=\n\s*Handoff:|\Z)', raw_response, re.DOTALL | re.IGNORECASE)
         if answer_match:
             answer = answer_match.group(1).strip()
             
-        # Only cite chunks whose content keywords actually appear in the answer
+        # Extract cited sources directly from filenames in the answer text [filename.md - ...]
         cited_sources = []
-        for score, base, chunk in retrieved_chunks:
-            # Check if any meaningful words from the chunk text appear in the answer
-            chunk_keywords = [w for w in chunk['heading'].lower().split() if len(w) > 3]
-            if any(kw in answer.lower() for kw in chunk_keywords):
-                if chunk['filename'] not in cited_sources:
-                    cited_sources.append(chunk['filename'])
+        md_matches = re.findall(r'\b([\w-]+\.md)\b', answer)
+        for src in md_matches:
+            if any(chunk['filename'] == src for _, _, chunk in retrieved_chunks) and src not in cited_sources:
+                cited_sources.append(src)
+                
+        # If no explicit inline citation was found in answer text, fall back to matching heading keywords
+        if not cited_sources:
+            for score, base, chunk in retrieved_chunks:
+                chunk_keywords = [w for w in chunk['heading'].lower().split() if len(w) > 3]
+                if any(kw in answer.lower() for kw in chunk_keywords):
+                    if chunk['filename'] not in cited_sources:
+                        cited_sources.append(chunk['filename'])
         
-        # If no smart match found, fall back to top-1 chunk only
+        # If still no match found, fall back to top-1 chunk only
         if not cited_sources and retrieved_chunks:
             cited_sources = [retrieved_chunks[0][2]['filename']]
         

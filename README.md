@@ -89,17 +89,17 @@ The knowledge base is only 14 documents. TF-IDF with cosine similarity provides 
 └──────────────────────┬──────────────────────────────┘
                        │
                        ▼
-┌──────────────────────────────────────────────────────┐
-│               agent.py — SupportAgent                │
-│                                                      │
-│  1. Extract Order ID (regex: ORD-XXXX)               │
-│  2. If order ID found → OrderLookupSystem            │
+┌─────────────────────────────────────────────────────────┐
+│               agent.py — SupportAgent                   │
+│                                                         │
+│  1. Extract Order ID (regex: ORD-XXXX)                  │
+│  2. If order ID found → OrderLookupSystem               │
 │  3. Retrieve top-3 policy chunks via KnowledgeRetriever │
-│  4. Build system prompt with context + guidelines    │
-│  5. Call Ollama (streaming) with conversation history │
-│  6. Post-process: extract answer, detect handoff,    │
-│     attach citations programmatically                │
-└───────┬──────────────────┬───────────────────────────┘
+│  4. Build system prompt with context + guidelines       │
+│  5. Call Ollama (streaming) with conversation history   │
+│  6. Post-process: extract answer, detect handoff,       │
+│     attach citations programmatically                   │
+└───────┬──────────────────┬──────────────────────────────┘
         │                  │
         ▼                  ▼
 ┌───────────────┐  ┌────────────────┐
@@ -153,28 +153,28 @@ This runs all 20 test cases (15 visible + 5 original) and prints individual resu
 | source-conflict | 1 | 0 |
 | **Total** | **20** | **5/20** |
 
-### Final Result (after fixes, `llama3.2:3b`, fuzzy matching + heuristic handoff)
+### Final Result (local `llama3.2:3b` evaluation run)
 
 | Category | Cases | Passed |
 |---|---|---|
-| retrieval | 3 | 3 |
+| retrieval | 3 | 2 |
 | multi-source-grounding | 1 | 0 |
 | conversation | 1 | 0 |
-| groundedness | 4 | 2 |
-| tool-use | 3 | 2 |
-| tool-reliability | 3 | 3 |
+| groundedness | 4 | 1 |
+| tool-use | 3 | 1 |
+| tool-reliability | 3 | 2 |
 | privacy | 1 | 0 |
 | prompt-security | 2 | 0 |
 | abstention | 1 | 0 |
 | source-conflict | 1 | 0 |
-| **Total** | **20** | **10/20** |
+| **Total** | **20** | **6/20** |
 
 ### What improved and why
 
-- **Retrieval** 1→3: Fuzzy keyword matching compensates for the model paraphrasing ("30 days" vs "30 calendar days").
-- **Tool-reliability** 1→3: Programmatic handoff for unknown orders and PII sanitization for cancelled orders eliminated false negatives.
-- **Groundedness** 1→2: Smarter citation logic (only citing chunks whose heading keywords appear in the answer) stopped forbidden sources from leaking through.
-- **Tool-use** 1→2: Upgrading from 0.5B to 3B model allowed correct extraction of order details like carrier name and ETA.
+- **Retrieval** (2/3): Standard and TrailPlus return window queries correctly match policy timelines and cite the primary active documents (`01-returns-policy-current.md` and `09-trailplus-membership.md`).
+- **Tool-reliability** (2/3): Programmatic handoff correctly handles unknown order lookup (`ORD-9999`) and cancelled orders (`ORD-1004`), preventing stale ETA delivery hallucination.
+- **Tool-use** (1/3): Missing order ID case (`Where is my order?`) cleanly prompts the user to supply their order ID without inventing fictitious order statuses.
+- **Groundedness** (1/4): Condition queries like custom item condition accurately respect policy scope.
 
 ### What still fails
 
@@ -237,6 +237,30 @@ This runs all 20 test cases (15 visible + 5 original) and prints individual resu
 
 ---
 
+### Bug 5: TrailPlus 45-Day vs Standard 30-Day Return Window Confusion
+
+**Reproduction**: Ask "How long does a regular customer have to return an unused backpack?" The model returned "45 calendar days" (`09-trailplus-membership.md`) instead of "30 calendar days" (`01-returns-policy-current.md`).
+
+**Root Cause**: Retrieval returned both the standard return policy chunk and the TrailPlus membership policy chunk. Without explicit instruction to distinguish customer types, the 3B model defaulted to the 45-day TrailPlus timeframe.
+
+**Fix**: Updated system prompt guidelines in `agent.py` to explicitly instruct the model: standard/regular customers get 30 calendar days (per `01-returns-policy-current.md`), and 45 days (per `09-trailplus-membership.md`) applies ONLY if the user explicitly specifies TrailPlus membership.
+
+**Regression Test**: `standard-return-window` case — asserts the output specifies 30 calendar days and cites `01-returns-policy-current.md`.
+
+---
+
+### Bug 6: Windows CP1252 Terminal `UnicodeEncodeError` in Evaluation Runner
+
+**Reproduction**: Executing `python run_evaluation.py` on Windows Command Prompt / PowerShell threw a crash: `UnicodeEncodeError: 'charmap' codec can't encode character '\u2713'`.
+
+**Root Cause**: `run_evaluation.py` attempted to print Unicode checkmark (`✓`) and cross (`✗`) characters to `sys.stdout`, which fails on Windows terminals using standard legacy CP1252 encoding.
+
+**Fix**: Replaced Unicode checkmark symbols in `run_evaluation.py` with standard ASCII strings (`PASS` and `FAIL`).
+
+**Regression Test**: Running `python run_evaluation.py` executes cleanly on Windows without encoding exceptions.
+
+---
+
 ## 8. Known Limitations & Production Improvements
 
 ### Current Limitations
@@ -280,20 +304,19 @@ elif any(word in raw_response.lower() for word in ['human', 'representative', 'i
 
 ---
 
-## 10. Demo
+## 10. Demo Video & Screencast
 
-> **TODO**: Record a 2–4 minute terminal screencast showing:
-> 1. A knowledge-base question with citations
-> 2. An order lookup
-> 3. A multi-turn conversation
-> 4. A refusal / handoff case
-> 5. The evaluation suite running
->
-> Then embed it here:
->
-> ```
-> ![Demo](./demo.gif)
-> ```
+- **Full Video Demo (7 min)**: [Watch Full Video Demo (Google Drive)](https://drive.google.com/file/d/1HofXbAcrLK0MPfR5TBKbrxIOfJPggjL9/view?usp=sharing)
+
+### Quick Preview
+
+![Demo Screencast](./demo.gif)
+
+*The screencast above demonstrates:*
+1. **Policy Query**: Answering return window questions with exact source citations (`[01-returns-policy-current.md]`).
+2. **Order Lookup**: Fetching order status safely without disclosing PII.
+3. **Multi-turn Conversation**: Maintaining context across follow-up questions.
+4. **Evaluation Runner**: Executing `python run_evaluation.py` across test cases.
 
 ---
 
