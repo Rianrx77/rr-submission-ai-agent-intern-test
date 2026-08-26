@@ -7,7 +7,7 @@ from orders import OrderLookupSystem
 
 
 class SupportAgent:
-    def __init__(self, model_name='qwen3.5:4b'):
+    def __init__(self, model_name='llama3.2:3b'):
         self.model_name = model_name
         self.retriever = KnowledgeRetriever()
         self.order_system = OrderLookupSystem()
@@ -20,21 +20,27 @@ class SupportAgent:
         return None
 
     def _call_ollama(self, messages):
-        """Sends the conversation history and system instructions to local Ollama API."""
+        """Sends the conversation history and system instructions to local Ollama API via streaming."""
         url = "http://localhost:11434/api/chat"
         payload = {
             "model": self.model_name,
             "messages": messages,
-            "stream": False,
+            "stream": True,
             "options": {
                 "temperature": 0.0  # Keep it deterministic for reliability
             }
         }
         try:
-            response = requests.post(url, json=payload, timeout=120)
+            response = requests.post(url, json=payload, stream=True)
             response.raise_for_status()
-            result = response.json()
-            return result['message']['content']
+            
+            full_content = ""
+            for line in response.iter_lines():
+                if line:
+                    chunk = json.loads(line)
+                    if "message" in chunk and "content" in chunk["message"]:
+                        full_content += chunk["message"]["content"]
+            return full_content
         except Exception as e:
             return f"Error communicating with Ollama: {str(e)}"
 
@@ -96,7 +102,7 @@ Your goal is to answer the user's questions accurately and safely based ONLY on 
 ===============
 
 GUIDELINES:
-1. Groundedness: Answer ONLY using facts explicitly mentioned in the context above. If the context does not contain the answer or is insufficient, say "I'm sorry, but the provided information is insufficient to answer your question." and suggest transferring to a human support representative. Do not invent details or assume anything.
+1. Groundedness: Answer ONLY using facts explicitly mentioned in the context above. If the context does not contain the answer, say "I cannot answer this based on the provided context." Do not invent details or assume anything.
 2. Citation: For every policy or product detail you state, you MUST cite the source file and heading. Format citations EXACTLY as [Filename - Heading], e.g., [01-returns-policy-current.md - Standard return window]. Do not cite files that are not in the context.
 3. Order Lookup:
    - If the user asks about an order, but no order details are present in the context, ask them to provide their order ID.
@@ -113,10 +119,12 @@ GUIDELINES:
      - The order status is 'exception'.
      - The user asks for a human, manager, or representative.
      - The user wants to cancel, refund, or change their address (these actions are unsupported).
+7. Conciseness:
+   - Provide a VERY brief, direct answer. 1 or 2 sentences MAXIMUM. Do not ramble.
 
 FORMAT YOUR RESPONSE EXACTLY AS:
 Answer:
-<your detailed answer here, with in-line source citations>
+<your answer here, with in-line source citations>
 
 Handoff: <True or False>
 """
@@ -141,47 +149,67 @@ Handoff: <True or False>
         # Check for program-level handoff triggers
         if order_info and order_info.get('handoff_required'):
             handoff = True
+        if order_info and order_info.get('error'):
+            handoff = True
             
-        # Parse Handoff flag from model's structured text
-        handoff_match = re.search(r'Handoff:\s*(true|false)', raw_response, re.IGNORECASE)
-        if handoff_match:
-            handoff = handoff_match.group(1).lower() == 'true' or handoff
+        # Heuristic handoff: check if the model's answer mentions needing a human
+        answer_lower = raw_response.lower()
+        handoff_phrases = ['human representative', 'contact support', 'human agent', 
+                          'escalate', 'transfer you', 'cannot complete', 'cannot assist',
+                          'cannot change', 'cannot cancel', 'cannot approve']
+        if any(phrase in answer_lower for phrase in handoff_phrases):
+            handoff = True
+            
+        # NOTE: We do NOT trust the model's own "Handoff: True/False" output.\n        # Small local models are unreliable at this. Handoff is fully controlled\n        # by the programmatic triggers above.
             
         # Extract the "Answer:" portion from the response if format was followed
         answer_match = re.search(r'Answer:\s*(.*?)(?=\n\s*Handoff:|\Z)', raw_response, re.DOTALL | re.IGNORECASE)
         if answer_match:
             answer = answer_match.group(1).strip()
             
-        # Extract cited filenames from the answer to track sources programmatically
+        # Only cite chunks whose content keywords actually appear in the answer
         cited_sources = []
-        for file in os.listdir('knowledge-base'):
-            if file in answer:
-                cited_sources.append(file)
-                
+        for score, base, chunk in retrieved_chunks:
+            # Check if any meaningful words from the chunk text appear in the answer
+            chunk_keywords = [w for w in chunk['heading'].lower().split() if len(w) > 3]
+            if any(kw in answer.lower() for kw in chunk_keywords):
+                if chunk['filename'] not in cited_sources:
+                    cited_sources.append(chunk['filename'])
+        
+        # If no smart match found, fall back to top-1 chunk only
+        if not cited_sources and retrieved_chunks:
+            cited_sources = [retrieved_chunks[0][2]['filename']]
+        
         return answer, handoff, cited_sources
 
 if __name__ == '__main__':
-    # You can change the model here if you want to use qwen3.5:4b instead
-    agent = SupportAgent(model_name='dolphin3:8b')
-    print("Welcome to Aster & Row Support Agent Terminal!")
-    print("Type 'exit' or 'quit' to quit.\n")
+    agent = SupportAgent(model_name='llama3.2:3b')
+    print("=== Aster & Row AI Support Agent ===")
+    print("Type 'exit' or 'quit' to close the session.\n")
     
     chat_history = []
     
     while True:
         try:
             user_input = input("You: ")
-            if user_input.strip().lower() == 'exit' or 'quit':
+            if user_input.strip().lower() in ['exit', 'quit']:
+                print("Closing session. Goodbye!")
                 break
                 
             if not user_input.strip():
                 continue
                 
+            print("Agent is thinking...")
             ans, handoff_flag, cited_files = agent.run_turn(user_input, chat_history)
             
-            print(f"\nAgent: {ans}")
-            print(f"[Citations: {', '.join(cited_files) if cited_files else 'None'}]")
-            print(f"[Human Handoff Recommended: {handoff_flag}]")
+            print(f"\nAgent:\n{ans}\n")
+            
+            if cited_files:
+                print(f"Citations: {', '.join(cited_files)}")
+            else:
+                print("Citations: None")
+                
+            print(f"Human Handoff Recommended: {handoff_flag}")
             print("-" * 50 + "\n")
             
             # Save history
@@ -189,4 +217,5 @@ if __name__ == '__main__':
             chat_history.append({"role": "assistant", "content": f"Answer:\n{ans}\n\nHandoff: {handoff_flag}"})
             
         except KeyboardInterrupt:
+            print("\nSession interrupted. Goodbye!")
             break
